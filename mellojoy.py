@@ -150,6 +150,41 @@ def _ensure_data_files() -> list[str]:
             pass
     return created
 
+
+def _set_taskbar_icon() -> None:
+    """起動中のコンソール窓のアイコンを、この exe に埋め込まれたアイコンに設定する。
+    PyInstaller の --icon はファイルアイコンを設定するが、タスクバー（実行中の窓）には
+    反映されないことがあるため、WM_SETICON で明示設定する。Windows 以外・失敗時は無視。
+    ★ 配布ZIPに .ico を同梱しなくても、exe 自身に埋め込まれたアイコンを使う。"""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        # タスクバーで python/conhost とグルーピングされないよう独自AppIDを付与
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("NigronWorks.MelloJoy.Bot")
+        except Exception:
+            pass
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if not hwnd:
+            return
+        # この実行ファイル(exe)に埋め込まれた先頭アイコンを取り出す
+        exe = sys.executable
+        big = ctypes.c_void_p()
+        small = ctypes.c_void_p()
+        n = ctypes.windll.shell32.ExtractIconExW(exe, 0, ctypes.byref(big),
+                                                 ctypes.byref(small), 1)
+        WM_SETICON = 0x0080
+        ICON_SMALL = 0
+        ICON_BIG = 1
+        if n and big and big.value:
+            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, big)
+        if n and small and small.value:
+            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, small)
+    except Exception:
+        pass
+
+
 # ── SSL エラー識別文字列（モジュールレベル定数）────────────────────────────────
 # MelloJoyAPI._post() と .book() で共有。定義を一か所に集約。
 _SSL_ERROR_STRS: tuple[str, ...] = (
@@ -596,7 +631,7 @@ def _set_browser_limit(n: int) -> None:
 BUILD_ID = "fire-A5"
 # ★ アプリのバージョン表示。配布リリースのタグ(vX.Y.Z)と合わせること。
 #   リリースを上げるときは、ここと GitHub のタグを同じ番号にする。
-APP_VERSION = "3.0.1"
+APP_VERSION = "3.0.2"
 
 # ★ Fix 62: グローバル cf_clearance キャッシュ
 #   全ワーカーが取得した cf_clearance を共有し、ブラウザログイン回数を削減する。
@@ -787,6 +822,78 @@ def mark_success(pair: str, slot_time: str = ""):
         "slot_time": slot_time,
         "timestamp": ts,
     })
+
+
+# ── 全体Webhook（成功時のみ・個人情報なし・URLハードコード）──────────────────────
+#   当選1件ごとに固定の Discord Webhook へ通知する。
+#   ★ メールアドレス・氏名・パスワードなどの個人情報は一切載せない。
+#   ★ 送る内容: 日付 / 予約枠 / 設定アカウント数 / プレソルブ秒前 / 再撃回数 / Ver / 取得時間。
+_GLOBAL_WEBHOOK_URL = ("https://discordapp.com/api/webhooks/1572358343043981484/"
+                       "5Piw2ZHHnDaCmkGdv0E95YTpS4p-9KQxB7sIKDScqWGiVNTxNouNweIF95ODKqsnVRr8")
+# ★ 連投時に Discord のレート制限(429)で弾かれないよう、送信を直列化するロック。
+#   複数当選が同時に発生しても、1通ずつ順に送り、429 は Retry-After を尊重して再送する。
+_win_wh_lock = threading.Lock()
+
+
+def _coerce_field(v, fallback: str = "-") -> str:
+    """Discord の embed field value は空文字だと 400 で弾かれる。必ず非空の文字列にする。"""
+    s = "" if v is None else str(v)
+    s = s.strip()
+    return s if s else fallback
+
+
+def _fire_win_webhook(date, slot_time, acct_count, presolve_lead, chase_count, store_id=None) -> None:
+    """当選1件ごとに固定 Webhook へ通知（成功時のみ・個人情報なし・fire-and-forget）。"""
+    url = _GLOBAL_WEBHOOK_URL
+    if not url:
+        return
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        _pl = str(int(float(presolve_lead)))
+    except Exception:
+        _pl = str(presolve_lead)
+    embed = {
+        "title": "success(MelloJoy)",
+        "color": 3066993,   # green
+        "fields": [
+            {"name": "日付",            "value": _coerce_field(date),      "inline": True},
+            {"name": "予約店舗",        "value": _coerce_field(store_id),  "inline": True},
+            {"name": "予約枠",          "value": _coerce_field(slot_time), "inline": True},
+            {"name": "設定アカウント数", "value": _coerce_field(acct_count), "inline": True},
+            {"name": "プレソルブ",      "value": _coerce_field(f"{_pl}s前"), "inline": True},
+            {"name": "再撃回数",        "value": _coerce_field(chase_count), "inline": True},
+        ],
+        "footer": {"text": f"MelloJoy BOT v{APP_VERSION} • 取得 {ts}"[:2040]},
+    }
+    payload = {"username": "MelloJoy BOT", "embeds": [embed]}
+
+    def _post():
+        # ★ 直列送信＋429(レート制限)は Retry-After を尊重して再送。連投でも弾かれず全通届く。
+        with _win_wh_lock:
+            for _att in range(6):
+                try:
+                    s = _req.Session()
+                    s.trust_env = False   # HTTP_PROXY / HTTPS_PROXY を無視して直接送信
+                    r = s.post(url, json=payload, timeout=12)
+                    if r.status_code == 429:
+                        try:
+                            _ra = r.headers.get("Retry-After")
+                            if _ra is None:
+                                _ra = (r.json() or {}).get("retry_after")
+                            wait = float(_ra) if _ra is not None else 1.0
+                        except Exception:
+                            wait = 1.0
+                        time.sleep(min(max(wait, 0.2), 10.0))
+                        continue
+                    # 成功/その他 → バースト回避に軽く間隔を空けて終了
+                    time.sleep(0.35)
+                    return
+                except Exception:
+                    time.sleep(0.5)
+    try:
+        _wh_pool.submit(_post)
+    except Exception:
+        pass
 
 def load_proxies() -> list[str]:
     if not PROXIES_F.exists(): return []
@@ -2945,6 +3052,10 @@ class MelloJoyAPI:
         _sid = int(self.cfg.get("store_id", 2))
         raw = self._get(f"/api/registrations/bookable-dates?store_id={_sid}")
         if raw is None: return []
+        # ★ 新API: {"code":0,"message":"ok","data":{"bookableDays":7,"dates":[...]}}
+        #   _get はエンベロープ全体を返すので、ここで data を展開する（欠落すると空になる）。
+        if isinstance(raw, dict) and "dates" not in raw and "data" in raw:
+            raw = raw["data"]
         # Response is base64-encoded JSON string or dict with base64 value
         def _decode(v: str) -> list[str]:
             try:
@@ -2966,6 +3077,9 @@ class MelloJoyAPI:
         # ★ slots も store スコープ化済み。store_id を付けないと枠が空で返る。
         _sid = int(self.cfg.get("store_id", 2))
         raw = self._get(f"/api/registrations/slots?date={date}&store_id={_sid}")
+        # ★ 新API: {"code":0,"message":"ok","data":[{slotIndex...}]} 形式。data(list) を展開。
+        if isinstance(raw, dict) and isinstance(raw.get("data"), list):
+            return raw["data"]
         return raw if isinstance(raw, list) else []
 
     def get_available_slots(self, date: str) -> list[dict]:
@@ -6662,6 +6776,13 @@ class _FireRetryManager:
                 self.wins.append((si, email, stime, att))
                 try: mark_success(self.sessions[si][1], f"{self.target_date},{stime}" if stime else self.target_date)
                 except Exception: pass
+                # ★ 全体Webhook（1当選ごと・個人情報なし）
+                try:
+                    _fire_win_webhook(self.target_date, stime, len(self.sessions),
+                                      self.cfg.get("fire_align_lead_sec", 25),
+                                      self.cfg.get("fire_attempts", 1),
+                                      store_id=self.cfg.get("store_id", 2))
+                except Exception: pass
                 print(f"  {Fore.GREEN}🎉 当選({tag}{att}回目) {email} 枠{stime} status={st} lat={lat:.0f}ms{Style.RESET_ALL}", flush=True)
                 self.log.info(f"WIN {tag}{att} {email} status={st} 枠={stime or '?'} lat={lat:.0f}ms body={txt[:120]}")
                 return
@@ -7245,6 +7366,11 @@ def menu_fire_engine_prod(cfg: dict):
                         except Exception: _px = "?"
                         _err = _o.get("error") or ""
                         if _o.get("won"):
+                            try:
+                                _fire_win_webhook(target_date, _stime, len(sessions),
+                                                  _ALIGN_LEAD, _attempts,
+                                                  store_id=cfg.get("store_id", 2))
+                            except Exception: pass
                             print(f"  {Fore.GREEN}🎉 当選(本隊) {_tag} {_em} 枠{_stime or '?'} 応答{_dstr} lat={_lat:.0f}ms"
                                   f"{Style.RESET_ALL}", flush=True)
                             logger.info(f"WIN {_tag} {_em} status={_st} 枠={_stime or '?'} 試行{_att}回 応答={_dstr} "
@@ -7390,6 +7516,11 @@ def menu_fire_engine_prod(cfg: dict):
                     except Exception: pass
                     _wtxt = f" 枠{_wtime}" if _wtime else ""
                     if x.get("tag") not in _live_logged:
+                        try:
+                            _fire_win_webhook(target_date, _wtime, len(sessions),
+                                              _ALIGN_LEAD, _attempts,
+                                              store_id=cfg.get("store_id", 2))
+                        except Exception: pass
                         print(f"  {Fore.GREEN}🎉 当選 {x.get('tag')} {email} status={st}{_wtxt} (試行{nat}回目){Style.RESET_ALL}")
                         logger.info(f"WIN {x.get('tag')} {email} status={st} 枠={_wtime or '?'} 試行{nat}回 "
                                     f"lat={_lat:.0f}ms proxy={_pxy} body={body[:120]}")
@@ -7541,6 +7672,8 @@ def menu_proxy_tester(cfg: dict):
 
 
 def main():
+    # ★ タスクバーに exe 埋め込みアイコンを反映（コンソール窓へ WM_SETICON）
+    _set_taskbar_icon()
     # ★ Fix 45: 起動時に仮ロガー設定（cfg 読込前）
     _setup_logging(debug_mode=False)
 
