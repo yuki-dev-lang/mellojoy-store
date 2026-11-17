@@ -91,13 +91,36 @@ if errorlevel 1 (
 echo   Installing optional deps (colorama)...
 %PY% -m pip install "colorama>=0.4"
 if errorlevel 1 echo   [WARN] colorama failed (optional) - continuing without colors.
+echo   Installing PyArmor (obfuscation)...
+%PY% -m pip install "pyarmor>=8.0"
+if errorlevel 1 (
+    echo   [ERROR] Could not install pyarmor. See the message above.
+    goto :err
+)
 
 echo.
-echo === [3/5] Building exe with icon ===
-REM  mellojoy.exe needs curl_cffi fully collected (C-extension + bundled data),
-REM  otherwise it fails at runtime with: No module named 'curl_cffi'.
+echo === [3/5] Obfuscate (PyArmor) then build exe with icon ===
+REM  Step A: obfuscate mellojoy.py into obfdist\ (bytecode encrypted).
+if exist "obfdist" rmdir /s /q "obfdist"
+%PY% -m pyarmor gen -O obfdist mellojoy.py
+if errorlevel 1 (
+    echo   [ERROR] PyArmor obfuscation failed. See the message above.
+    goto :err
+)
+REM  Detect the generated runtime package name (pyarmor_runtime_XXXXXX).
+set "PART="
+for /d %%D in ("obfdist\pyarmor_runtime_*") do set "PART=%%~nxD"
+if not defined PART (
+    echo   [ERROR] PyArmor runtime package not found under obfdist.
+    goto :err
+)
+echo   [OK] obfuscated. runtime = %PART%
+REM  Step B: PyInstaller on the OBFUSCATED script. Bundle the pyarmor runtime,
+REM          and keep curl_cffi fully collected (C-ext + data) + icon.
 %PY% -m PyInstaller --onefile --clean --noconfirm --name mellojoy --icon "%ICON%" ^
-    --collect-all curl_cffi --hidden-import requests mellojoy.py
+    --collect-all curl_cffi --hidden-import requests ^
+    --paths obfdist --collect-all %PART% ^
+    "obfdist\mellojoy.py"
 if errorlevel 1 goto :err
 %PY% -m PyInstaller --onefile --clean --noconfirm --name mellojoy-launcher --icon "%ICON%" launcher.py
 if errorlevel 1 goto :err
