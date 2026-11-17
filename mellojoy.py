@@ -124,6 +124,14 @@ _DATA_FILE_TEMPLATES: dict = {
         "# 形式: 1行に1メールアドレス   例) user001@example.com\n"
         "# （catch-all モードでは不要。# で始まる行と空行は無視されます）\n"
     ),
+    "accountresult.txt": (
+        "# accountresult.txt — リザルトモード[3]の入力（1行1件）\n"
+        "# 各アカウントにログインして実際の予約時間を取得し CSV 化します。\n"
+        "# 形式: email:password            （最小）\n"
+        "#       email:password:氏名        （氏名つき）\n"
+        "# 例) taro@example.com:Passw0rd:田中 太郎\n"
+        "# （# で始まる行と空行は無視されます）\n"
+    ),
 }
 
 
@@ -586,6 +594,9 @@ def _set_browser_limit(n: int) -> None:
 
 # ★ Fix 71: 起動画面に表示するビルド識別子。実行中の exe / py が最新かどうかの確認用。
 BUILD_ID = "fire-A5"
+# ★ アプリのバージョン表示。配布リリースのタグ(vX.Y.Z)と合わせること。
+#   リリースを上げるときは、ここと GitHub のタグを同じ番号にする。
+APP_VERSION = "3.0.1"
 
 # ★ Fix 62: グローバル cf_clearance キャッシュ
 #   全ワーカーが取得した cf_clearance を共有し、ブラウザログイン回数を削減する。
@@ -2930,7 +2941,9 @@ class MelloJoyAPI:
 
     # ── bookable dates & slots ─────────────────────────────────────────────────
     def get_bookable_dates(self) -> list[str]:
-        raw = self._get("/api/registrations/bookable-dates")
+        # ★ API は store スコープ化済み。store_id を付けないと日付が空で返る。
+        _sid = int(self.cfg.get("store_id", 2))
+        raw = self._get(f"/api/registrations/bookable-dates?store_id={_sid}")
         if raw is None: return []
         # Response is base64-encoded JSON string or dict with base64 value
         def _decode(v: str) -> list[str]:
@@ -2950,7 +2963,9 @@ class MelloJoyAPI:
         return []
 
     def get_slots(self, date: str) -> list[dict]:
-        raw = self._get(f"/api/registrations/slots?date={date}")
+        # ★ slots も store スコープ化済み。store_id を付けないと枠が空で返る。
+        _sid = int(self.cfg.get("store_id", 2))
+        raw = self._get(f"/api/registrations/slots?date={date}&store_id={_sid}")
         return raw if isinstance(raw, list) else []
 
     def get_available_slots(self, date: str) -> list[dict]:
@@ -6284,6 +6299,7 @@ def menu_test_turnstile(cfg: dict):
         _nmax = _inp_int("  使用アカウント数", min(len(accs), int(cfg.get("parallel", 5))))
         _nmax = max(1, min(_nmax, len(accs)))
         prxs = load_proxies()
+        _prompt_store_id(cfg)   # ★ 本番と同様に store_id を選択（枠取得・予約に必須）
         logger = logging.getLogger("test_engine")
 
         def _prep(i):
@@ -6352,7 +6368,7 @@ def menu_test_turnstile(cfg: dict):
                 print(f"  {Fore.CYAN}  ※ 検知発火は解禁の数十秒前に実行してください。{Style.RESET_ALL}")
                 _pause(); return
             target_date = dates[-1]
-            detect_url = f"{_api0.BASE}/api/registrations/bookable-dates"
+            detect_url = f"{_api0.BASE}/api/registrations/bookable-dates?store_id={int(cfg.get('store_id', 2))}"
             try: _tsl = _api0.get_slots(target_date) or []
             except Exception: _tsl = []
             _tslots = [{"date": s.get("slotDate", target_date), "index": s.get("slotIndex")}
@@ -6888,7 +6904,7 @@ def menu_fire_engine_prod(cfg: dict):
     if not sessions:
         _err("ログインできた台がありません。"); _pause(); return
     _api0 = sessions[0][0]
-    detect_url = f"{_api0.BASE}/api/registrations/bookable-dates"
+    detect_url = f"{_api0.BASE}/api/registrations/bookable-dates?store_id={int(cfg.get('store_id', 2))}"
     print(f"  検知URL : {Fore.CYAN}{detect_url}{Style.RESET_ALL}  （{target_date} が解禁入りした瞬間を検知）")
 
     # ── 再撃(追い撃ち)用セッションを事前ログイン（方式A / 13時前に確保）────────────
@@ -7562,7 +7578,7 @@ def main():
         logging.getLogger().info("Debug mode ON — logs/YYYYMMDD_HHMMSS.log に DEBUG ログを記録")
 
     while True:
-        _box(f"MelloJoy BOT  v3.0  [{BUILD_ID}]")
+        _box(f"MelloJoy BOT  v{APP_VERSION}  [{BUILD_ID}]")
 
         accs    = load_accounts()
         prxs    = load_proxies()
