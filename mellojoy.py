@@ -37,9 +37,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as
 from typing import Optional
 
 # ── BASE path (must be computed before Playwright is imported) ───────────────
-# When running as a PyInstaller onedir EXE sys.frozen is True and
-# sys.executable points to mellojoy.exe; __file__ is unreliable there.
-if getattr(sys, 'frozen', False):
+# PyInstaller は sys.frozen=True、Nuitka は __compiled__ を定義する。
+# どちらの凍結ビルドでも sys.executable が mellojoy.exe を指すのでその隣を基準にする。
+# （__file__ は onefile 展開先の一時フォルダを指すため使えない）
+if getattr(sys, 'frozen', False) or "__compiled__" in globals():
     BASE = pathlib.Path(sys.executable).parent
 else:
     BASE = pathlib.Path(__file__).parent
@@ -5865,12 +5866,15 @@ def _choose_imap(cfg: dict):
 # ── Playwright browser auto-install ───────────────────────────────────────────
 def _ensure_playwright_browsers():
     """Check for Chromium; download it on first run if absent.
+    ★ playwright 非同梱ビルド(Nuitka等)では _HAS_PW=False。その場合は何もしない。
 
     In a PyInstaller onedir EXE the playwright Node.js driver is bundled inside
     _internal/playwright/driver/.  We invoke it directly so the download works
     even without a separate Python installation on the target machine.
     In source-run mode we simply call  python -m playwright install chromium.
     """
+    if not _HAS_PW:
+        return   # playwright 非同梱 → ブラウザ関連は無効（capsolver運用）
     import subprocess
 
     pw_dir = BASE / "pw-browsers"
