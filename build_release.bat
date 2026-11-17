@@ -91,37 +91,45 @@ if errorlevel 1 (
 echo   Installing optional deps (colorama)...
 %PY% -m pip install "colorama>=0.4"
 if errorlevel 1 echo   [WARN] colorama failed (optional) - continuing without colors.
-echo   Installing PyArmor (obfuscation)...
-%PY% -m pip install "pyarmor>=8.0"
+echo   Installing Nuitka (compiles Python to C - strong protection)...
+%PY% -m pip install nuitka
 if errorlevel 1 (
-    echo   [ERROR] Could not install pyarmor. See the message above.
+    echo   [ERROR] Could not install nuitka. See the message above.
     goto :err
 )
 
 echo.
-echo === [3/5] Obfuscate (PyArmor) then build exe with icon ===
-REM  Step A: obfuscate mellojoy.py into obfdist\ (bytecode encrypted).
-if exist "obfdist" rmdir /s /q "obfdist"
-%PY% -m pyarmor gen -O obfdist mellojoy.py
+echo === [3/5] Compile mellojoy.exe with Nuitka (C), build launcher with PyInstaller ===
+REM  Nuitka compiles mellojoy.py to native C -> no .pyc to extract (strong protection).
+REM  - First run downloads MinGW64 automatically (no MSVC needed): --assume-yes-for-downloads
+REM  - curl_cffi: include its package + data (vendored libcurl DLL + cacert) and _cffi_backend
+REM  - playwright is NOT bundled (optional browser fallback): --nofollow-import-to=playwright
+REM    The app degrades gracefully (browser features off; capsolver token path works).
+REM  NOTE: Nuitka compilation takes several minutes. Please wait.
+echo   Compiling... (this can take several minutes on first run)
+if exist "dist\mellojoy.exe" del /f /q "dist\mellojoy.exe"
+%PY% -m nuitka --onefile --assume-yes-for-downloads --mingw64 ^
+    --windows-icon-from-ico="%ICON%" ^
+    --include-package=curl_cffi --include-package-data=curl_cffi ^
+    --include-module=_cffi_backend ^
+    --include-package=certifi --include-package-data=certifi ^
+    --nofollow-import-to=playwright ^
+    --output-dir=dist --output-filename=mellojoy.exe ^
+    mellojoy.py
 if errorlevel 1 (
-    echo   [ERROR] PyArmor obfuscation failed. See the message above.
+    echo.
+    echo   [ERROR] Nuitka compile failed. Read the message above.
+    echo           If it is about a C compiler, let Nuitka download MinGW64
+    echo           ^(it should, via --assume-yes-for-downloads^) and retry.
     goto :err
 )
-REM  Detect the generated runtime package name (pyarmor_runtime_XXXXXX).
-set "PART="
-for /d %%D in ("obfdist\pyarmor_runtime_*") do set "PART=%%~nxD"
-if not defined PART (
-    echo   [ERROR] PyArmor runtime package not found under obfdist.
+if not exist "dist\mellojoy.exe" (
+    echo   [ERROR] dist\mellojoy.exe was not produced by Nuitka.
     goto :err
 )
-echo   [OK] obfuscated. runtime = %PART%
-REM  Step B: PyInstaller on the OBFUSCATED script. Bundle the pyarmor runtime,
-REM          and keep curl_cffi fully collected (C-ext + data) + icon.
-%PY% -m PyInstaller --onefile --clean --noconfirm --name mellojoy --icon "%ICON%" ^
-    --collect-all curl_cffi --hidden-import requests ^
-    --paths obfdist --collect-all %PART% ^
-    "obfdist\mellojoy.py"
-if errorlevel 1 goto :err
+echo   [OK] Nuitka build: dist\mellojoy.exe
+
+REM  Launcher has no secrets -> keep the fast PyInstaller build (with icon).
 %PY% -m PyInstaller --onefile --clean --noconfirm --name mellojoy-launcher --icon "%ICON%" launcher.py
 if errorlevel 1 goto :err
 
