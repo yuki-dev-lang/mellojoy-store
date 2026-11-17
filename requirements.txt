@@ -1,0 +1,15 @@
+# mellojoy runtime dependencies (for the frozen mellojoy.exe)
+#   build_release.bat installs these before PyInstaller so they get bundled.
+#
+# IMPORTANT: build with 64-bit Python 3.11 / 3.12 / 3.13.
+#   curl_cffi ships prebuilt wheels only for 64-bit CPython (not 32-bit).
+#   On 32-bit or a brand-new Python (e.g. 3.14) pip falls back to a source
+#   build that usually fails. Use 64-bit Python 3.12 to be safe.
+curl_cffi>=0.7        # TLS impersonation (required for Cloudflare on mellojoylucky.cn)
+requests>=2.31        # HTTP (capsolver etc.) - hard-required (import requests)
+colorama>=0.4         # colored console output (optional but recommended)
+# playwright is intentionally NOT listed: the browser fallback is optional and
+# bundling Chromium is heavy. The code degrades gracefully when it is absent
+# (_HAS_PW=False). If you want browser fallback inside the exe, add:
+#   playwright>=1.40
+# then run:  playwright install chromium   and ship pw-browsers next to the exe.
